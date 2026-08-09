@@ -1,0 +1,116 @@
+services:
+  db:
+    image: mysql:8.4@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wanzhou}
+      MYSQL_USER: ${MYSQL_USER:-wanzhou}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./deploy/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks: [internal]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  api:
+    build:
+      context: ./backend
+      # Reuse the host resolver during package installation. This keeps the
+      # workaround local to this project's build and avoids daemon changes.
+      network: host
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wanzhou}
+      MYSQL_USER: ${MYSQL_USER:-wanzhou}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY in .env}
+      CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: ${CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS:-}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://merchant.example.com}
+      LOGIN_ATTEMPTS_PER_MINUTE: ${LOGIN_ATTEMPTS_PER_MINUTE:-8}
+      DEMO_OPERATOR_PASSWORD: ${DEMO_OPERATOR_PASSWORD:?set DEMO_OPERATOR_PASSWORD in .env}
+      DEMO_MERCHANT_PASSWORD: ${DEMO_MERCHANT_PASSWORD:?set DEMO_MERCHANT_PASSWORD in .env}
+      UPLOAD_DIR: /app/uploads
+      BACKUP_STATUS_FILE: /status/latest.json
+      TZ: Asia/Shanghai
+    volumes:
+      - uploads_data:/app/uploads
+      - /var/lib/wst2-status:/status:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  web:
+    build:
+      context: ./frontend
+      network: host
+      args:
+        VITE_ICP_NUMBER: ${VITE_ICP_NUMBER:-}
+        VITE_PUBLIC_SECURITY_NUMBER: ${VITE_PUBLIC_SECURITY_NUMBER:-}
+        VITE_PUBLIC_SECURITY_CODE: ${VITE_PUBLIC_SECURITY_CODE:-}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [internal]
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:rw,nosuid,nodev,noexec,uid=101,gid=101,mode=0700
+      - /var/run:rw,nosuid,nodev,noexec,uid=101,gid=101,mode=0700
+      - /tmp:rw,nosuid,nodev,noexec,uid=101,gid=101,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  mysql_data:
+  uploads_data:
+
+networks:
+  internal:
+    driver: bridge
