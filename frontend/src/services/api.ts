@@ -1,11 +1,15 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { portalRole } from '@/portal'
+
+const browserHeaders: Record<string, string> = { 'X-WST2-Browser-Session': '1' }
+if (portalRole) browserHeaders['X-WST2-Portal'] = portalRole
 
 const api = axios.create({
   baseURL: '/api/v1',
   timeout: 12000,
   withCredentials: true,
-  headers: { 'X-WST2-Browser-Session': '1' },
+  headers: browserHeaders,
 })
 
 api.interceptors.response.use(

@@ -12,7 +12,7 @@ from ..agreements import PRIVACY_VERSION, RULES_VERSION
 from ..audit import add_audit, model_snapshot, request_client_ip
 from ..config import get_settings
 from ..database import get_db
-from ..deps import authenticated_user, operator_only
+from ..deps import authenticated_user, enforce_portal_role, operator_only
 from ..models import OperatorInvite, User, UserConsent, utc_now
 from ..schemas import (
     ChangePasswordIn,
@@ -105,6 +105,7 @@ def login(
                 user.failed_login_count = 0
             db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号或密码错误")
+    enforce_portal_role(request, user.role)
     window.clear()
     user.failed_login_count = 0
     user.locked_until = None
@@ -121,6 +122,7 @@ def register(
     response: Response,
     db: Session = Depends(get_db),
 ):
+    enforce_portal_role(request, payload.account_type)
     enforce_minute_limit(
         request,
         registration_attempts,

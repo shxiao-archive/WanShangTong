@@ -8,6 +8,23 @@ from .models import User
 from .security import BROWSER_SESSION_HEADER, SESSION_COOKIE_NAME, decode_access_token
 
 bearer = HTTPBearer(auto_error=False)
+PORTAL_HEADER = "x-wst2-portal"
+PORTAL_ROLES = {"merchant", "operator"}
+
+
+def requested_portal_role(request: Request) -> str | None:
+    role = request.headers.get(PORTAL_HEADER, "").strip().lower()
+    return role if role in PORTAL_ROLES else None
+
+
+def enforce_portal_role(request: Request, user_role: str) -> None:
+    portal_role = requested_portal_role(request)
+    if portal_role and portal_role != user_role:
+        target = "管理端" if user_role == "operator" else "商户端"
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"该账号请前往{target}登录",
+        )
 
 
 def authenticated_user(
@@ -30,6 +47,7 @@ def authenticated_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号不可用")
     if int(payload.get("ver", 0)) != user.token_version:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已失效")
+    enforce_portal_role(request, user.role)
     request.state.user_id = user.id
     return user
 

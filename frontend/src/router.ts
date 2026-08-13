@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hydrateSession, session } from '@/stores/session'
+import { hydrateSession, logoutSession, session } from '@/stores/session'
+import { portalRole } from '@/portal'
 import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import OnboardingView from '@/views/OnboardingView.vue'
@@ -32,6 +33,10 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   await hydrateSession()
+  if (portalRole && session.user && session.user.role !== portalRole) {
+    await logoutSession()
+    return '/login'
+  }
   if (!to.meta.public && !session.user) return '/login'
   if (session.user?.must_change_password && !to.meta.passwordChange) return '/change-password'
   const awaitingOnboarding = session.user?.role === 'merchant' && !session.user.merchant_id

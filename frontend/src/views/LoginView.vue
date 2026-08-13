@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { DataAnalysis, Lock, User } from '@element-plus/icons-vue'
 import api from '@/services/api'
 import { setSession } from '@/stores/session'
+import { portalLabel, portalLoginUrl, portalRole } from '@/portal'
 
 const router = useRouter()
 const mode = ref<'login' | 'register'>('login')
@@ -13,8 +14,11 @@ const password = ref('')
 const loading = ref(false)
 const agreements = ref<any>(null)
 const agreementDialog = ref<'platform_rules' | 'privacy_policy' | null>(null)
+const currentPortalLabel = portalRole ? portalLabel(portalRole) : '数字化经营平台'
+const otherPortalRole = portalRole === 'merchant' ? 'operator' : 'merchant'
+const otherPortalUrl = portalRole ? portalLoginUrl(otherPortalRole) : null
 const registerForm = reactive({
-  account_type: 'merchant' as 'merchant' | 'operator',
+  account_type: (portalRole || 'merchant') as 'merchant' | 'operator',
   username: '',
   display_name: '',
   password: '',
@@ -28,6 +32,10 @@ async function submitLogin() {
   loading.value = true
   try {
     const result = await api.post('/auth/login', { username: username.value, password: password.value })
+    if (portalRole && result.user.role !== portalRole) {
+      await api.post('/auth/logout', null, { silentAuth: true })
+      return ElMessage.error(`该账号请前往${portalLabel(result.user.role)}登录`)
+    }
     setSession(result.user)
     router.push(
       result.user.must_change_password
@@ -95,14 +103,15 @@ onMounted(async () => {
         <el-segmented v-model="mode" class="mode-switch" :options="[{ label: '账号登录', value: 'login' }, { label: '创建账号', value: 'register' }]" />
 
         <template v-if="mode === 'login'">
-          <span class="welcome">欢迎回来</span>
-          <h2>登录数字化经营平台</h2>
-          <p class="hint">请输入账号和密码进入平台</p>
+          <span class="welcome">{{ portalRole ? `${currentPortalLabel} · 欢迎回来` : '欢迎回来' }}</span>
+          <h2>{{ portalRole === 'operator' ? '登录运营管理平台' : '登录数字化经营平台' }}</h2>
+          <p class="hint">请输入{{ portalRole === 'operator' ? '管理人员' : portalRole === 'merchant' ? '商户' : '' }}账号和密码进入平台</p>
           <el-form label-position="top" @submit.prevent="submitLogin">
             <el-form-item label="登录账号"><el-input v-model="username" size="large" :prefix-icon="User" autocomplete="username" /></el-form-item>
             <el-form-item label="登录密码"><el-input v-model="password" size="large" show-password type="password" :prefix-icon="Lock" autocomplete="current-password" @keyup.enter="submitLogin" /></el-form-item>
             <el-button class="submit" type="primary" size="large" :loading="loading" @click="submitLogin">进入平台</el-button>
           </el-form>
+          <a v-if="otherPortalUrl" class="portal-link" :href="otherPortalUrl">前往{{ portalLabel(otherPortalRole) }}</a>
         </template>
 
         <template v-else>
@@ -110,12 +119,13 @@ onMounted(async () => {
           <h2>创建试运营账号</h2>
           <p class="hint">{{ registerForm.account_type === 'merchant' ? '先创建账号，登录后再提交店铺入驻申请' : '请使用有效邀请码创建管理人员账号' }}</p>
           <el-form label-position="top" @submit.prevent="submitRegister">
-            <el-form-item label="账号类型">
+            <el-form-item v-if="!portalRole" label="账号类型">
               <el-radio-group v-model="registerForm.account_type" class="account-type">
                 <el-radio-button value="merchant">商户账号</el-radio-button>
                 <el-radio-button value="operator">管理人员账号</el-radio-button>
               </el-radio-group>
             </el-form-item>
+            <el-alert v-else class="portal-account-type" :closable="false" type="info" :title="`正在创建${currentPortalLabel}账号`" />
             <div class="register-grid">
               <el-form-item label="登录账号"><el-input v-model="registerForm.username" maxlength="50" autocomplete="username" placeholder="字母、数字、点、横线或下划线" /></el-form-item>
               <el-form-item :label="registerForm.account_type === 'merchant' ? '联系人姓名' : '姓名'"><el-input v-model="registerForm.display_name" maxlength="80" /></el-form-item>
@@ -190,6 +200,9 @@ h2 { margin: 11px 0 8px; font-size: 27px; letter-spacing: -.5px; }
 .password-rule { margin: -5px 0 13px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .agreements{display:flex;flex-direction:column;align-items:flex-start;margin:0 0 12px}.agreements :deep(.el-checkbox){height:25px}.agreements button{padding:0;border:0;background:none;color:var(--brand);cursor:pointer}.agreement-version{color:var(--muted);font-size:12px}.agreement-content{white-space:pre-wrap;line-height:1.9;color:#435351}
 .submit { width: 100%; height: 48px; margin-top: 4px; border-radius: 10px; }
+.portal-link { display: block; margin-top: 18px; text-align: center; color: var(--brand); font-size: 12px; text-decoration: none; }
+.portal-link:hover { text-decoration: underline; }
+.portal-account-type { margin-bottom: 18px; }
 .safe { text-align: center; margin: 25px 0 0; color: #a0aaa9; font-size: 11px; }
 :deep(.el-form-item__label) { font-size: 12px; font-weight: 600; color: #465655; }
 @media (max-width: 900px) {
