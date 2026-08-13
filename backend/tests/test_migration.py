@@ -36,4 +36,5 @@ def test_alembic_upgrades_empty_database(tmp_path):
         "application_events",
         "audit_logs",
         "operator_invites",
+        "notifications",
     }.issubset(tables)

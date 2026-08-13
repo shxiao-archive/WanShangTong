@@ -14,7 +14,7 @@ from sqlalchemy import text
 from .config import get_settings
 from .audit import safe_request_id
 from .database import Base, SessionLocal, engine
-from .routers import applications, auth, business_data, credentials, dashboard, legal, media, merchants, onboarding, resources, system, users
+from .routers import applications, auth, business_data, credentials, dashboard, inbox, legal, media, merchants, onboarding, resources, system, users
 from .seed import seed_database
 
 class JsonFormatter(logging.Formatter):
@@ -153,5 +153,6 @@ app.include_router(business_data.router, prefix="/api/v1")
 app.include_router(media.router, prefix="/api/v1")
 app.include_router(resources.router, prefix="/api/v1")
 app.include_router(applications.router, prefix="/api/v1")
+app.include_router(inbox.router, prefix="/api/v1")
 app.include_router(dashboard.router, prefix="/api/v1")
 app.include_router(system.router, prefix="/api/v1")

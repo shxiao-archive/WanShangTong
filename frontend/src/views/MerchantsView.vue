@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElLoading, ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Check, Document, Search, View } from '@element-plus/icons-vue'
 import api from '@/services/api'
@@ -8,6 +8,7 @@ import { session } from '@/stores/session'
 import type { Merchant } from '@/types'
 
 const router = useRouter()
+const route = useRoute()
 const loading = ref(false)
 const items = ref<Merchant[]>([])
 const total = ref(0)
@@ -25,6 +26,12 @@ const previewUrl = ref('')
 const previewDocument = ref<any>(null)
 const previewLoading = ref(false)
 const expandedMerchantId = ref<number | null>(null)
+const onboardingStatus = computed(() => ({
+  draft: { label: '草稿', type: 'info' },
+  pending: { label: '待审核', type: 'warning' },
+  approved: { label: '已通过', type: 'success' },
+  needs_changes: { label: '待补资料', type: 'danger' },
+} as Record<string, { label: string, type: 'info' | 'warning' | 'success' | 'danger' }>)[onboardingDetail.value?.status] || { label: '未知状态', type: 'info' })
 
 async function load() {
   loading.value = true
@@ -63,6 +70,12 @@ async function openOnboarding(item: any) {
   } finally {
     detailLoading.value = false
   }
+}
+function clearOnboardingRoute() {
+  if (!onboardingDetail.value || String(route.query.onboarding_id || '') !== String(onboardingDetail.value.id)) return
+  const query = { ...route.query }
+  delete query.onboarding_id
+  void router.replace({ query })
 }
 async function approveOnboarding() {
   const item = onboardingDetail.value
@@ -113,6 +126,12 @@ function refreshOnboardingFromNotification() {
 }
 onMounted(() => Promise.all([load(), loadOnboarding()]))
 onMounted(() => window.addEventListener('wst:onboarding-changed', refreshOnboardingFromNotification))
+watch(() => route.query.onboarding_id, async value => {
+  const id = Number(value)
+  if (!Number.isInteger(id) || id <= 0) return
+  if (id === onboardingDetail.value?.id) detailVisible.value = true
+  else await openOnboarding({ id })
+}, { immediate: true })
 onBeforeUnmount(() => {
   closePreview()
   window.removeEventListener('wst:onboarding-changed', refreshOnboardingFromNotification)
@@ -143,13 +162,13 @@ onBeforeUnmount(() => {
         <el-empty v-if="!onboardingLoading && !onboardingItems.length" description="暂无待审核入驻申请" :image-size="56" />
       </div>
     </section>
-    <el-drawer v-model="detailVisible" class="onboarding-drawer" size="min(720px, 100%)" title="入驻申请审核">
+    <el-drawer v-model="detailVisible" class="onboarding-drawer" size="min(720px, 100%)" title="入驻申请详情" @closed="clearOnboardingRoute">
       <div v-loading="detailLoading" class="application-detail">
         <template v-if="onboardingDetail">
           <div class="detail-hero">
             <span class="application-avatar">{{ onboardingDetail.merchant_name.slice(0,1) }}</span>
             <div><h2>{{ onboardingDetail.merchant_name }}</h2><p>账号 {{ onboardingDetail.username }} · 申请人 {{ onboardingDetail.display_name }}</p></div>
-            <el-tag type="warning">待审核</el-tag>
+            <el-tag :type="onboardingStatus.type">{{ onboardingStatus.label }}</el-tag>
           </div>
           <el-alert v-if="onboardingDetail.existing_entity" :closable="false" type="warning" show-icon :title="`该主体已绑定 ${onboardingDetail.existing_entity.merchant_count} 家门店`" />
           <el-alert v-if="onboardingDetail.duplicate_store" :closable="false" type="error" show-icon title="该主体下已存在同名同址门店，当前申请不能通过" />
@@ -157,7 +176,8 @@ onBeforeUnmount(() => {
           <section class="detail-section"><h3>门店资料</h3><dl><dt>展示名称</dt><dd>{{ onboardingDetail.merchant_name }}</dd><dt>所属行业</dt><dd>{{ onboardingDetail.industry }}</dd><dt>经营地址</dt><dd>{{ onboardingDetail.address }}</dd><dt>营业时间</dt><dd>{{ onboardingDetail.business_hours }}</dd><dt>经营规模</dt><dd>{{ onboardingDetail.scale }} · {{ onboardingDetail.employee_count }}人 · {{ onboardingDetail.store_area }}㎡</dd><dt>当前网络</dt><dd>{{ onboardingDetail.network_environment }} · {{ onboardingDetail.bandwidth_mbps }}Mbps</dd></dl></section>
           <section class="detail-section"><h3>联系与授权</h3><dl><dt>联系人</dt><dd>{{ onboardingDetail.contact_name }}</dd><dt>联系电话</dt><dd>{{ onboardingDetail.phone }}</dd><dt>关系</dt><dd>{{ onboardingRelation(onboardingDetail.contact_relationship) }}</dd><dt>授权声明</dt><dd>{{ onboardingDetail.authorization_confirmed ? '已确认' : '不适用' }}</dd></dl></section>
           <section class="detail-section"><h3>资质材料（{{ onboardingDetail.documents.length }}）</h3><button v-for="document in onboardingDetail.documents" :key="document.id" type="button" class="credential-row" @click="previewCredential(document)"><Document /><span><b>{{ document.original_name }}</b><small>{{ document.mime_type }} · {{ Math.ceil(document.file_size/1024) }}KB</small></span><em>安全预览</em></button></section>
-          <div class="review-actions"><el-button plain @click="requestChanges">要求补充资料</el-button><el-button type="primary" :icon="Check" :disabled="onboardingDetail.duplicate_store" @click="approveOnboarding">通过申请</el-button></div>
+          <el-alert v-if="onboardingDetail.status==='needs_changes' && onboardingDetail.review_note" :closable="false" type="error" :title="`补充说明：${onboardingDetail.review_note}`" />
+          <div v-if="onboardingDetail.status==='pending'" class="review-actions"><el-button plain @click="requestChanges">要求补充资料</el-button><el-button type="primary" :icon="Check" :disabled="onboardingDetail.duplicate_store" @click="approveOnboarding">通过申请</el-button></div>
         </template>
       </div>
     </el-drawer>

@@ -371,6 +371,43 @@ class MediaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class NotificationOut(BaseModel):
+    id: int
+    type: str
+    category: Literal["onboarding", "service"]
+    title: str
+    message: str
+    action: Literal[
+        "open_onboarding_review",
+        "open_onboarding_form",
+        "open_service_application",
+        "open_overview",
+    ]
+    target_type: str
+    target_id: int | None
+    is_demo: bool
+    read_at: datetime | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkItemOut(BaseModel):
+    key: str
+    category: Literal["onboarding", "service"]
+    title: str
+    summary: str
+    status: str
+    status_label: str
+    is_demo: bool
+    created_at: datetime
+    updated_at: datetime
+    action: Literal[
+        "open_onboarding_review", "open_onboarding_form", "open_service_application"
+    ]
+    target_id: int
+
+
 APPLICATION_STATUSES = {"pending", "processing", "completed", "canceled"}
 
 

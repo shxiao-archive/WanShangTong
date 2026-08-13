@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ChatDotRound, Clock, Search } from '@element-plus/icons-vue'
 import api from '@/services/api'
@@ -8,6 +8,7 @@ import { session } from '@/stores/session'
 import type { ApplicationStatus, ServiceApplication } from '@/types'
 
 const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const items = ref<ServiceApplication[]>([])
 const total = ref(0)
@@ -75,6 +76,13 @@ async function openDetail(id: number) {
   detailDialog.value = true
 }
 
+function clearDetailRoute() {
+  if (!detail.value || String(route.query.id || '') !== String(detail.value.id)) return
+  const query = { ...route.query }
+  delete query.id
+  void router.replace({ query })
+}
+
 async function changeStatus(target: ApplicationStatus) {
   if (!detail.value) return
   if (target === 'canceled') {
@@ -107,11 +115,13 @@ async function addNote() {
   }
 }
 
-onMounted(async () => {
-  await load()
-  const id = Number(route.query.id)
-  if (id) await openDetail(id)
-})
+onMounted(load)
+watch(() => route.query.id, async value => {
+  const id = Number(value)
+  if (!Number.isInteger(id) || id <= 0) return
+  if (id === detail.value?.id) detailDialog.value = true
+  else await openDetail(id)
+}, { immediate: true })
 </script>
 
 <template>
@@ -134,7 +144,7 @@ onMounted(async () => {
     </section>
     <div class="pagination"><el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="prev, pager, next" @current-change="load" /></div>
 
-    <el-drawer v-model="detailDialog" :title="detail?.resource_snapshot.name || '申请详情'" size="min(620px, 100%)">
+    <el-drawer v-model="detailDialog" :title="detail?.resource_snapshot.name || '申请详情'" size="min(620px, 100%)" @closed="clearDetailRoute">
       <template v-if="detail">
         <div class="detail-head">
           <div><small>{{ detail.merchant_name }}</small><h2>{{ detail.resource_snapshot.name }}</h2><p>申请编号 #{{ detail.id }} · {{ dateTime(detail.created_at) }}</p></div>

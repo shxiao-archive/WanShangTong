@@ -13,6 +13,7 @@ api.interceptors.response.use(
   (error) => {
     const status = error.response?.status
     const silentAuth = !!(error.config as any)?.silentAuth
+    const silentError = !!(error.config as any)?.silentError
     const message = error.response?.data?.message || (error.code === 'ECONNABORTED' ? '请求超时，请稍后重试' : '服务暂时不可用')
     if (status === 401 && !location.pathname.includes('/login')) {
       localStorage.removeItem('wst_token')
@@ -24,7 +25,7 @@ api.interceptors.response.use(
       && error.response?.data?.message === '请先修改初始密码'
       && !location.pathname.includes('/change-password')
     ) location.href = '/change-password'
-    if (!silentAuth) ElMessage.error(message)
+    if (!silentAuth && !silentError) ElMessage.error(message)
     return Promise.reject(error)
   },
 )

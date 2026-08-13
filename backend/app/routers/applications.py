@@ -14,6 +14,7 @@ from ..models import (
     User,
     utc_now,
 )
+from ..notifications import notify_active_operators, notify_merchant_account
 from ..rules import recommend
 from ..schemas import (
     ApplicationCreate,
@@ -130,6 +131,18 @@ def create_application(
             to_status="pending",
             note=payload.merchant_note,
         )
+    )
+    notify_active_operators(
+        db,
+        notification_type="service_application_created",
+        category="service",
+        title="新的服务申请",
+        message=f"{merchant.name}申请了{snapshot['name']}，请及时处理",
+        action="open_service_application",
+        target_type="service_application",
+        target_id=row.id,
+        dedupe_key=f"service_application:{row.id}:created",
+        is_demo=row.is_demo,
     )
     add_audit(
         db,
@@ -263,16 +276,16 @@ def change_application_status(
     if payload.status in {"completed", "canceled"}:
         row.active_key = None
         row.completed_at = utc_now()
-    db.add(
-        ApplicationEvent(
-            application_id=row.id,
-            actor_user_id=user.id,
-            event_type="status_changed",
-            from_status=old_status,
-            to_status=payload.status,
-            note=payload.note,
-        )
+    event = ApplicationEvent(
+        application_id=row.id,
+        actor_user_id=user.id,
+        event_type="status_changed",
+        from_status=old_status,
+        to_status=payload.status,
+        note=payload.note,
     )
+    db.add(event)
+    db.flush()
     add_audit(
         db,
         user,
@@ -283,6 +296,28 @@ def change_application_status(
         after=model_snapshot(row),
         request=request,
     )
+    status_label = {
+        "pending": "待处理",
+        "processing": "办理中",
+        "completed": "已完成",
+        "canceled": "已取消",
+    }[payload.status]
+    resource_name = str((row.resource_snapshot or {}).get("name") or "服务申请")
+    notification_kwargs = {
+        "notification_type": "service_application_status_changed",
+        "category": "service",
+        "title": "服务申请状态已更新",
+        "message": f"{resource_name}当前状态：{status_label}",
+        "action": "open_service_application",
+        "target_type": "service_application",
+        "target_id": row.id,
+        "dedupe_key": f"application_event:{event.id}",
+        "is_demo": row.is_demo,
+    }
+    if user.role == "operator":
+        notify_merchant_account(db, row.merchant_id, **notification_kwargs)
+    else:
+        notify_active_operators(db, **notification_kwargs)
     db.commit()
     return Envelope(
         message="申请状态已更新",
@@ -322,6 +357,37 @@ def add_application_note(
         after={"event_id": event.id, "note": payload.note},
         request=request,
     )
+    resource_name = str((row.resource_snapshot or {}).get("name") or "服务申请")
+    if user.role == "operator":
+        notify_merchant_account(
+            db,
+            row.merchant_id,
+            notification_type="service_operator_note_added",
+            category="service",
+            title="服务申请有新的运营备注",
+            message=f"{resource_name}新增了运营跟进信息，请点击查看",
+            action="open_service_application",
+            target_type="service_application",
+            target_id=row.id,
+            dedupe_key=f"application_event:{event.id}",
+            is_demo=row.is_demo,
+        )
+    else:
+        merchant_name = db.scalar(
+            select(Merchant.name).where(Merchant.id == row.merchant_id)
+        ) or "商户"
+        notify_active_operators(
+            db,
+            notification_type="service_merchant_note_added",
+            category="service",
+            title="商户补充了服务申请留言",
+            message=f"{merchant_name}为{resource_name}补充了留言，请点击查看",
+            action="open_service_application",
+            target_type="service_application",
+            target_id=row.id,
+            dedupe_key=f"application_event:{event.id}",
+            is_demo=row.is_demo,
+        )
     db.commit()
     return Envelope(
         message="跟进备注已添加",

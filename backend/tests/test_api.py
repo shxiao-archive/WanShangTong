@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -17,8 +17,12 @@ from app.main import app
 from app.models import (
     CredentialDocument,
     MerchantOnboardingApplication,
+    Notification,
     OperatorInvite,
+    User,
+    utc_now,
 )
+from app.notifications import add_notification
 from app.routers.auth import registration_attempts
 from app.schemas import (
     USCC_CHARSET,
@@ -233,6 +237,27 @@ def xlsx_bytes(rows: list[list]) -> bytes:
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def register_operator_account(client: TestClient, username: str) -> dict:
+    invitation = client.post(
+        "/api/v1/auth/operator-invites", headers=operator_headers(client)
+    )
+    assert invitation.status_code == 201, invitation.text
+    registration_attempts.clear()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "account_type": "operator",
+            "username": username,
+            "password": "Inbox2026Pass",
+            "display_name": f"通知测试-{username}",
+            "invitation_code": invitation.json()["data"]["invitation_code"],
+            **agreement_acceptance(),
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
 
 
 def test_proxy_client_ip_uses_last_public_address():
@@ -917,3 +942,464 @@ def test_business_data_validation_soft_delete_and_excel_transaction():
         exported = client.get("/api/v1/merchants/1/business-data/export", headers=headers)
         assert template.status_code == exported.status_code == 200
         assert template.headers["content-type"].startswith("application/vnd.openxmlformats")
+
+
+def test_notification_helper_deduplicates_without_exposing_sensitive_text():
+    with SessionLocal() as db:
+        operator = db.scalar(select(User).where(User.username == "operator"))
+        assert operator
+        kwargs = {
+            "recipient_user_id": operator.id,
+            "notification_type": "service_merchant_note_added",
+            "category": "service",
+            "title": "测试通知\n标题",
+            "message": "仅显示安全摘要",
+            "action": "open_service_application",
+            "target_type": "service_application",
+            "target_id": 999999,
+            "dedupe_key": "test:notification:dedupe",
+            "is_demo": False,
+        }
+        add_notification(db, **kwargs)
+        add_notification(db, **kwargs)
+        db.commit()
+        rows = db.scalars(
+            select(Notification).where(
+                Notification.recipient_user_id == operator.id,
+                Notification.dedupe_key == kwargs["dedupe_key"],
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].title == "测试通知 标题"
+
+        for index in range(2):
+            add_notification(
+                db,
+                **{
+                    **kwargs,
+                    "target_id": 999998 - index,
+                    "dedupe_key": f"test:notification:page:{index}",
+                },
+            )
+        db.commit()
+
+    with TestClient(app) as client:
+        headers = operator_headers(client)
+        first = client.get(
+            "/api/v1/inbox/notifications?page=1&page_size=2",
+            headers=headers,
+        ).json()["data"]
+        second = client.get(
+            "/api/v1/inbox/notifications?page=2&page_size=2",
+            headers=headers,
+        ).json()["data"]
+        assert first["total"] >= 3
+        assert len(first["items"]) == 2
+        assert {item["id"] for item in first["items"]}.isdisjoint(
+            item["id"] for item in second["items"]
+        )
+
+
+def test_notification_time_filter_defaults_to_seven_days():
+    targets = {"recent": 990001, "month": 990002, "older": 990003}
+    with SessionLocal() as db:
+        operator = db.scalar(select(User).where(User.username == "operator"))
+        assert operator
+        for label, days in (("recent", 6), ("month", 20), ("older", 45)):
+            row = add_notification(
+                db,
+                recipient_user_id=operator.id,
+                notification_type=f"time_filter_{label}",
+                category="service",
+                title=f"时间筛选 {label}",
+                message="仅用于验证通知时间范围",
+                action="open_overview",
+                target_type="time_filter_test",
+                target_id=targets[label],
+                dedupe_key=f"test:notification:time-filter:{label}",
+            )
+            assert row
+            row.created_at = utc_now() - timedelta(days=days)
+            row.read_at = utc_now()
+        db.commit()
+
+    with TestClient(app) as client:
+        headers = operator_headers(client)
+
+        def target_ids(query: str) -> set[int]:
+            separator = "&" if query else "?"
+            response = client.get(
+                f"/api/v1/inbox/notifications{query}{separator}page_size=100",
+                headers=headers,
+            )
+            assert response.status_code == 200, response.text
+            return {
+                item["target_id"]
+                for item in response.json()["data"]["items"]
+                if item["target_type"] == "time_filter_test"
+            }
+
+        assert target_ids("") == {targets["recent"]}
+        assert target_ids("?period=7d") == {targets["recent"]}
+        assert target_ids("?period=30d") == {targets["recent"], targets["month"]}
+        assert target_ids("?period=all") == set(targets.values())
+        assert client.get(
+            "/api/v1/inbox/notifications?period=invalid", headers=headers
+        ).status_code == 422
+
+
+def test_notification_rolls_back_with_business_transaction():
+    dedupe_key = "test:notification:rolled-back"
+    with SessionLocal() as db:
+        operator = db.scalar(select(User).where(User.username == "operator"))
+        assert operator
+        add_notification(
+            db,
+            recipient_user_id=operator.id,
+            notification_type="service_application_created",
+            category="service",
+            title="不应保留的通知",
+            message="业务事务将回滚",
+            action="open_service_application",
+            target_type="service_application",
+            target_id=999997,
+            dedupe_key=dedupe_key,
+        )
+        db.flush()
+        db.rollback()
+    with SessionLocal() as db:
+        assert db.scalar(
+            select(Notification.id).where(Notification.dedupe_key == dedupe_key)
+        ) is None
+
+
+def test_inbox_onboarding_service_flow_and_cross_user_isolation():
+    registration_attempts.clear()
+    with TestClient(app) as client:
+        observer = register_operator_account(client, "inbox_observer")
+        disabled = register_operator_account(client, "inbox_disabled")
+        operator = operator_headers(client)
+        disabled_user_id = disabled["user"]["id"]
+        with SessionLocal() as db:
+            disabled_user = db.get(User, disabled_user_id)
+            assert disabled_user and disabled_user.role == "operator"
+            disabled_user.is_active = False
+            db.commit()
+
+        registration_attempts.clear()
+        registered = client.post(
+            "/api/v1/auth/register",
+            json={
+                "account_type": "merchant",
+                "username": "inbox_trial_shop",
+                "password": "Inbox2026Pass",
+                "display_name": "通知试运营店主",
+                **agreement_acceptance(),
+            },
+        )
+        assert registered.status_code == 201, registered.text
+        merchant = registered.json()["data"]
+        merchant_headers = auth_header(merchant["access_token"])
+        application_id = submit_registered_application(
+            client,
+            merchant,
+            {
+                "name": "通知中心试运营门店",
+                "industry": "零售",
+                "phone": "13912345678",
+                "address": "万州区通知测试路 8 号",
+            },
+        )
+
+        observer_headers = auth_header(observer["access_token"])
+        observer_inbox = client.get(
+            "/api/v1/inbox/notifications?state=unread",
+            headers=observer_headers,
+        )
+        assert observer_inbox.status_code == 200, observer_inbox.text
+        submitted_notice = next(
+            item
+            for item in observer_inbox.json()["data"]["items"]
+            if item["type"] in {"onboarding_submitted", "onboarding_resubmitted"}
+            and item["target_id"] == application_id
+        )
+        assert "13912345678" not in submitted_notice["message"]
+        assert client.get(
+            f"/api/v1/inbox/notifications/{submitted_notice['id']}",
+            headers=merchant_headers,
+        ).status_code == 404
+        assert client.patch(
+            f"/api/v1/inbox/notifications/{submitted_notice['id']}/read",
+            headers=merchant_headers,
+        ).status_code == 404
+        assert client.get("/api/v1/inbox/summary").status_code == 401
+
+        with SessionLocal() as db:
+            active_operator_ids = set(
+                db.scalars(
+                    select(User.id).where(
+                        User.role == "operator", User.is_active.is_(True)
+                    )
+                ).all()
+            )
+            recipient_ids = set(
+                db.scalars(
+                    select(Notification.recipient_user_id).where(
+                        Notification.target_type
+                        == "merchant_onboarding_application",
+                        Notification.target_id == application_id,
+                        Notification.type == "onboarding_submitted",
+                    )
+                ).all()
+            )
+        assert recipient_ids == active_operator_ids
+        assert disabled_user_id not in recipient_ids
+
+        operator_todos = client.get(
+            "/api/v1/inbox/work-items?category=onboarding", headers=operator
+        ).json()["data"]
+        assert any(
+            item["target_id"] == application_id
+            for item in operator_todos["items"]
+        )
+
+        requested = client.patch(
+            f"/api/v1/merchant-onboarding/{application_id}/review",
+            headers=operator,
+            json={"action": "request_changes", "note": "请核对实际经营地址"},
+        )
+        assert requested.status_code == 200, requested.text
+        merchant_notices = client.get(
+            "/api/v1/inbox/notifications?state=unread", headers=merchant_headers
+        ).json()["data"]["items"]
+        needs_notice = next(
+            item
+            for item in merchant_notices
+            if item["type"] == "onboarding_needs_changes"
+        )
+        assert "实际经营地址" not in needs_notice["message"]
+        merchant_todos = client.get(
+            "/api/v1/inbox/work-items", headers=merchant_headers
+        ).json()["data"]
+        assert merchant_todos == {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "page_size": 20,
+        }
+        merchant_summary = client.get(
+            "/api/v1/inbox/summary", headers=merchant_headers
+        ).json()["data"]
+        assert merchant_summary["todo_count"] == 0
+        assert merchant_summary["onboarding_needs_changes_count"] == 0
+        assert merchant_summary["service_pending_count"] == 0
+        assert merchant_summary["service_processing_count"] == 0
+
+        current = client.get(
+            "/api/v1/merchant-onboarding/me", headers=merchant_headers
+        ).json()["data"]
+        current["address"] = "万州区通知测试路 8 号附 1 号"
+        assert client.put(
+            "/api/v1/merchant-onboarding/me/draft",
+            headers=merchant_headers,
+            json=current,
+        ).status_code == 200
+        resubmitted = client.post(
+            "/api/v1/merchant-onboarding/me/submit",
+            headers=merchant_headers,
+            json={"truthfulness_confirmed": True, **agreement_acceptance()},
+        )
+        assert resubmitted.status_code == 200, resubmitted.text
+        old_notice = client.get(
+            "/api/v1/inbox/notifications", headers=merchant_headers
+        ).json()["data"]["items"]
+        old_notice = next(item for item in old_notice if item["id"] == needs_notice["id"])
+        assert old_notice["read_at"] is not None
+
+        approved = client.patch(
+            f"/api/v1/merchant-onboarding/{application_id}/review",
+            headers=operator,
+            json={"action": "approve", "note": ""},
+        )
+        assert approved.status_code == 200, approved.text
+        merchant_user = client.get(
+            "/api/v1/auth/me", headers=merchant_headers
+        ).json()["data"]
+        merchant_id = merchant_user["merchant_id"]
+        assert merchant_id
+        approved_notices = client.get(
+            "/api/v1/inbox/notifications?state=unread", headers=merchant_headers
+        ).json()["data"]["items"]
+        assert any(item["type"] == "onboarding_approved" for item in approved_notices)
+
+        created = client.post(
+            "/api/v1/service-applications",
+            headers=merchant_headers,
+            json={
+                "merchant_id": merchant_id,
+                "resource_id": 1,
+                "contact_name": "通知试运营店主",
+                "contact_phone": "13912345678",
+                "merchant_note": "只能在详情中看到的初始留言",
+            },
+        )
+        assert created.status_code == 201, created.text
+        service_id = created.json()["data"]["id"]
+        service_todos = client.get(
+            "/api/v1/inbox/work-items?category=service", headers=operator
+        ).json()["data"]["items"]
+        assert next(item for item in service_todos if item["target_id"] == service_id)[
+            "status"
+        ] == "pending"
+
+        processing = client.patch(
+            f"/api/v1/service-applications/{service_id}/status",
+            headers=operator,
+            json={"status": "processing", "note": "内部推进说明"},
+        )
+        assert processing.status_code == 200, processing.text
+        service_todos = client.get(
+            "/api/v1/inbox/work-items?category=service", headers=operator
+        ).json()["data"]["items"]
+        assert next(item for item in service_todos if item["target_id"] == service_id)[
+            "status"
+        ] == "processing"
+
+        raw_operator_note = "运营备注原文不应进入通知"
+        assert client.post(
+            f"/api/v1/service-applications/{service_id}/notes",
+            headers=operator,
+            json={"note": raw_operator_note},
+        ).status_code == 200
+        merchant_notices = client.get(
+            "/api/v1/inbox/notifications", headers=merchant_headers
+        ).json()["data"]["items"]
+        operator_note_notice = next(
+            item
+            for item in merchant_notices
+            if item["type"] == "service_operator_note_added"
+            and item["target_id"] == service_id
+        )
+        assert raw_operator_note not in operator_note_notice["message"]
+
+        raw_merchant_note = "商户留言原文不应进入通知"
+        assert client.post(
+            f"/api/v1/service-applications/{service_id}/notes",
+            headers=merchant_headers,
+            json={"note": raw_merchant_note},
+        ).status_code == 200
+        operator_notices = client.get(
+            "/api/v1/inbox/notifications", headers=observer_headers
+        ).json()["data"]["items"]
+        merchant_note_notice = next(
+            item
+            for item in operator_notices
+            if item["type"] == "service_merchant_note_added"
+            and item["target_id"] == service_id
+        )
+        assert raw_merchant_note not in merchant_note_notice["message"]
+
+        completed = client.patch(
+            f"/api/v1/service-applications/{service_id}/status",
+            headers=operator,
+            json={"status": "completed", "note": ""},
+        )
+        assert completed.status_code == 200, completed.text
+        service_todos = client.get(
+            "/api/v1/inbox/work-items?category=service", headers=operator
+        ).json()["data"]["items"]
+        assert not any(item["target_id"] == service_id for item in service_todos)
+
+        related_unread = client.get(
+            "/api/v1/inbox/notifications?state=unread", headers=merchant_headers
+        ).json()["data"]["items"]
+        related_unread = [
+            item
+            for item in related_unread
+            if item["target_type"] == "service_application"
+            and item["target_id"] == service_id
+        ]
+        assert len(related_unread) >= 2
+
+        marked = client.patch(
+            f"/api/v1/inbox/notifications/{operator_note_notice['id']}/read",
+            headers=merchant_headers,
+        )
+        assert marked.status_code == 200
+        remaining_related = client.get(
+            "/api/v1/inbox/notifications?state=unread", headers=merchant_headers
+        ).json()["data"]["items"]
+        assert not any(
+            item["target_type"] == "service_application"
+            and item["target_id"] == service_id
+            for item in remaining_related
+        )
+        observer_notice = client.get(
+            "/api/v1/inbox/notifications?state=unread", headers=observer_headers
+        ).json()["data"]["items"]
+        assert any(item["id"] == merchant_note_notice["id"] for item in observer_notice)
+        marked_again = client.patch(
+            f"/api/v1/inbox/notifications/{operator_note_notice['id']}/read",
+            headers=merchant_headers,
+        )
+        assert marked_again.status_code == 200
+        read_all = client.post(
+            "/api/v1/inbox/notifications/read-all", headers=merchant_headers
+        )
+        assert read_all.status_code == 200
+        assert client.get(
+            "/api/v1/inbox/summary", headers=merchant_headers
+        ).json()["data"]["unread_count"] == 0
+
+
+def test_demo_service_notification_and_work_item_are_labeled():
+    with TestClient(app) as client:
+        merchant = demo_login(client, "merchant")
+        merchant_headers = auth_header(merchant["access_token"])
+        resources = client.get(
+            "/api/v1/resources", headers=merchant_headers
+        ).json()["data"]
+        active = client.get(
+            "/api/v1/service-applications", headers=merchant_headers
+        ).json()["data"]["items"]
+        active_resource_ids = {
+            item["resource_id"]
+            for item in active
+            if item["status"] in {"pending", "processing"}
+        }
+        resource = next(item for item in resources if item["id"] not in active_resource_ids)
+        response = client.post(
+            "/api/v1/service-applications",
+            headers=merchant_headers,
+            json={
+                "merchant_id": merchant["user"]["merchant_id"],
+                "resource_id": resource["id"],
+                "contact_name": "演示商户",
+                "contact_phone": "13800000000",
+                "merchant_note": "",
+            },
+        )
+        assert response.status_code == 201, response.text
+        application_id = response.json()["data"]["id"]
+        operator = operator_headers(client)
+        notices = client.get(
+            "/api/v1/inbox/notifications", headers=operator
+        ).json()["data"]["items"]
+        notice = next(
+            item
+            for item in notices
+            if item["target_id"] == application_id
+            and item["type"] == "service_application_created"
+        )
+        assert notice["is_demo"] is True
+        todos = client.get(
+            "/api/v1/inbox/work-items?category=service", headers=operator
+        ).json()["data"]["items"]
+        assert next(item for item in todos if item["target_id"] == application_id)[
+            "is_demo"
+        ] is True
+        assert client.patch(
+            f"/api/v1/service-applications/{application_id}/status",
+            headers=merchant_headers,
+            json={"status": "canceled", "note": ""},
+        ).status_code == 200

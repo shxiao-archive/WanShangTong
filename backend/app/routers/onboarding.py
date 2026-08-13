@@ -34,6 +34,11 @@ from ..models import (
     UserConsent,
     utc_now,
 )
+from ..notifications import (
+    add_notification,
+    mark_related_notifications_read,
+    notify_active_operators,
+)
 from ..schemas import (
     CredentialDocumentOut,
     Envelope,
@@ -513,6 +518,7 @@ def submit_application(
             status_code=422,
             detail={"message": errors[0]["message"], "data": {"errors": errors}},
         )
+    was_resubmission = row.status == "needs_changes"
     before = model_snapshot(row)
     row.unified_social_credit_code = normalize_and_validate_uscc(
         row.unified_social_credit_code or ""
@@ -535,6 +541,28 @@ def submit_application(
         before=before,
         after=model_snapshot(row),
         request=request,
+    )
+    if was_resubmission:
+        mark_related_notifications_read(
+            db,
+            recipient_user_id=user.id,
+            notification_type="onboarding_needs_changes",
+            target_type="merchant_onboarding_application",
+            target_id=row.id,
+        )
+    notify_active_operators(
+        db,
+        notification_type=(
+            "onboarding_resubmitted" if was_resubmission else "onboarding_submitted"
+        ),
+        category="onboarding",
+        title="入驻资料已重新提交" if was_resubmission else "新的商户入驻申请",
+        message=f"{row.merchant_name}已提交入驻资料，请及时审核",
+        action="open_onboarding_review",
+        target_type="merchant_onboarding_application",
+        target_id=row.id,
+        dedupe_key=f"onboarding:{row.id}:submitted:{row.submitted_at.isoformat()}",
+        is_demo=False,
     )
     db.commit()
     db.refresh(row)
@@ -781,6 +809,34 @@ def review_application(
         after=model_snapshot(row),
         request=request,
     )
+    if row.status == "approved":
+        add_notification(
+            db,
+            recipient_user_id=applicant.id,
+            notification_type="onboarding_approved",
+            category="onboarding",
+            title="店铺入驻申请已通过",
+            message=f"{row.merchant_name}已通过审核，商户工作台现已开放",
+            action="open_overview",
+            target_type="merchant_onboarding_application",
+            target_id=row.id,
+            dedupe_key=f"onboarding:{row.id}:review:{row.reviewed_at.isoformat()}:approved",
+            is_demo=False,
+        )
+    else:
+        add_notification(
+            db,
+            recipient_user_id=applicant.id,
+            notification_type="onboarding_needs_changes",
+            category="onboarding",
+            title="入驻资料需要补充",
+            message=f"{row.merchant_name}的入驻资料需要补充，请查看管理员说明",
+            action="open_onboarding_form",
+            target_type="merchant_onboarding_application",
+            target_id=row.id,
+            dedupe_key=f"onboarding:{row.id}:review:{row.reviewed_at.isoformat()}:needs_changes",
+            is_demo=False,
+        )
     db.commit()
     db.refresh(row)
     return Envelope(

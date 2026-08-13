@@ -61,7 +61,7 @@ onMounted(load)
         <div class="card metric-card"><span class="metric-label">入驻商户</span><div class="metric-value">{{ overview.merchant_count }} <small>家</small></div><div class="metric-hint">覆盖万州核心商圈</div></div>
         <div class="card metric-card"><span class="metric-label">正常运营</span><div class="metric-value">{{ overview.active_count }} <small>家</small></div><div class="metric-hint">运营状态稳定</div></div>
         <div class="card metric-card"><span class="metric-label">覆盖行业</span><div class="metric-value">{{ Object.keys(overview.industry_distribution).length }} <small>类</small></div><div class="metric-hint">餐饮与零售为主</div></div>
-        <div class="card metric-card highlight"><span class="metric-label">待跟进</span><div class="metric-value">{{ overview.pending_application_count }} <small>项</small></div><div class="metric-hint">等待运营处理的申请</div></div>
+        <div class="card metric-card highlight"><span class="metric-label">待跟进</span><div class="metric-value">{{ overview.active_application_count }} <small>项</small></div><div class="metric-hint">待处理与办理中的申请</div></div>
       </div>
       <div class="two-col">
         <section class="card card-pad"><h2 class="section-title">行业分布</h2><v-chart class="chart small-chart" :option="industryOption" autoresize /></section>

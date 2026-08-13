@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -297,6 +298,36 @@ class ApplicationEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     application: Mapped[ServiceApplication] = relationship(back_populates="events")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "recipient_user_id", "dedupe_key", name="uq_notifications_recipient_dedupe"
+        ),
+        Index(
+            "ix_notifications_recipient_read_created",
+            "recipient_user_id",
+            "read_at",
+            "created_at",
+        ),
+        Index("ix_notifications_recipient_id", "recipient_user_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recipient_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    type: Mapped[str] = mapped_column(String(50))
+    category: Mapped[str] = mapped_column(String(30))
+    title: Mapped[str] = mapped_column(String(120))
+    message: Mapped[str] = mapped_column(String(300))
+    action: Mapped[str] = mapped_column(String(50))
+    target_type: Mapped[str] = mapped_column(String(40))
+    target_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+    dedupe_key: Mapped[str] = mapped_column(String(180))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 class AuditLog(Base):

@@ -30,15 +30,25 @@ def dashboard_overview(
     application_statement = select(func.count()).select_from(ServiceApplication).where(
         ServiceApplication.status == "pending"
     )
+    active_application_statement = select(func.count()).select_from(ServiceApplication).where(
+        ServiceApplication.status.in_(("pending", "processing"))
+    )
     if data_scope == "real":
         application_statement = application_statement.where(
+            ServiceApplication.is_demo.is_(False)
+        )
+        active_application_statement = active_application_statement.where(
             ServiceApplication.is_demo.is_(False)
         )
     elif data_scope == "demo":
         application_statement = application_statement.where(
             ServiceApplication.is_demo.is_(True)
         )
+        active_application_statement = active_application_statement.where(
+            ServiceApplication.is_demo.is_(True)
+        )
     result["pending_application_count"] = db.scalar(application_statement) or 0
+    result["active_application_count"] = db.scalar(active_application_statement) or 0
     result["demo_merchant_count"] = (
         db.scalar(
             select(func.count()).select_from(Merchant).where(Merchant.is_demo.is_(True))

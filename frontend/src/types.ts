@@ -109,3 +109,47 @@ export interface BusinessData {
   other_orders: number
   peak_hour: number
 }
+
+export type InboxAction =
+  | 'open_onboarding_review'
+  | 'open_onboarding_form'
+  | 'open_service_application'
+  | 'open_overview'
+
+export interface InboxSummary {
+  unread_count: number
+  latest_notification_id: number
+  todo_count: number
+  onboarding_pending_count: number
+  service_pending_count: number
+  service_processing_count: number
+  onboarding_needs_changes_count: number
+}
+
+export interface InboxNotification {
+  id: number
+  type: string
+  category: 'onboarding' | 'service'
+  title: string
+  message: string
+  action: InboxAction
+  target_type: string
+  target_id: number | null
+  is_demo: boolean
+  read_at: string | null
+  created_at: string
+}
+
+export interface WorkItem {
+  key: string
+  category: 'onboarding' | 'service'
+  title: string
+  summary: string
+  status: string
+  status_label: string
+  is_demo: boolean
+  created_at: string
+  updated_at: string
+  action: Exclude<InboxAction, 'open_overview'>
+  target_id: number
+}

@@ -7,16 +7,28 @@ import {
   Promotion, Shop, SwitchButton, Ticket, UserFilled,
 } from '@element-plus/icons-vue'
 import api from '@/services/api'
+import InboxCenter from '@/components/InboxCenter.vue'
+import { inboxLocation, inboxTargetIsAvailable } from '@/services/inbox'
 import { logoutSession, session } from '@/stores/session'
-import type { Merchant } from '@/types'
+import type { InboxNotification, InboxSummary, Merchant } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
 const collapsed = ref(false)
 const merchants = ref<Merchant[]>([])
 const mobileNav = ref<HTMLElement | null>(null)
-const pendingCount = ref(0)
-const onboardingPendingCount = ref(0)
+const inboxVisible = ref(false)
+const inboxSummary = ref<InboxSummary>({
+  unread_count: 0,
+  latest_notification_id: 0,
+  todo_count: 0,
+  onboarding_pending_count: 0,
+  service_pending_count: 0,
+  service_processing_count: 0,
+  onboarding_needs_changes_count: 0,
+})
+let inboxInitialized = false
+let latestNotificationId = 0
 const inviteDialog = ref(false)
 const inviteLoading = ref(false)
 const invitationCode = ref('')
@@ -29,94 +41,103 @@ const showMerchantSwitch = computed(
 )
 const nav = computed(() => [
   { path: '/overview', label: '工作台', icon: House },
-  ...(isOperator.value ? [{ path: '/merchants', label: '商户管理', icon: List, badge: onboardingPendingCount.value }] : []),
+  ...(isOperator.value ? [{ path: '/merchants', label: '商户管理', icon: List, badge: inboxSummary.value.onboarding_pending_count }] : []),
   { path: '/store', label: isOperator.value ? '商户档案' : '我的店铺', icon: Shop },
   { path: '/analytics', label: '经营分析', icon: Histogram },
   { path: '/portrait', label: '商户画像', icon: UserFilled },
   ...(!isOperator.value ? [{ path: '/recommendations', label: '资源推荐', icon: Promotion }] : []),
-  { path: '/applications', label: isOperator.value ? '服务跟进' : '我的申请', icon: Bell, badge: pendingCount.value },
+  { path: '/applications', label: isOperator.value ? '服务跟进' : '我的申请', icon: Bell, badge: inboxSummary.value.service_pending_count + inboxSummary.value.service_processing_count },
   ...(isOperator.value ? [{ path: '/resources', label: '资源管理', icon: Goods }] : []),
 ])
 
-async function loadApplicationSummary() {
-  const result = await api.get('/service-applications/summary')
-  pendingCount.value = isOperator.value ? result.pending_count : result.active_count
-}
-
-function onboardingSeenKey() {
-  return `wst_onboarding_seen_${session.user?.id || 'operator'}`
-}
-
-function loadSeenOnboardingSignatures(): string[] {
-  try {
-    const value = JSON.parse(localStorage.getItem(onboardingSeenKey()) || '[]')
-    return Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-async function loadOnboardingSummary() {
-  if (!isOperator.value) return
-  const result = await api.get('/merchant-onboarding/summary')
-  const previousCount = onboardingPendingCount.value
-  onboardingPendingCount.value = result.pending_count
-  document.title = result.pending_count
-    ? `(${result.pending_count}) ${baseDocumentTitle}`
+function updateDocumentTitle() {
+  document.title = inboxSummary.value.unread_count
+    ? `(${inboxSummary.value.unread_count}) ${baseDocumentTitle}`
     : baseDocumentTitle
+}
 
-  const seen = new Set(loadSeenOnboardingSignatures())
-  const current = result.latest.map((item: any) => ({
-    ...item,
-    signature: `${item.id}:${item.submitted_at || ''}`,
-  }))
-  const newItems = current.filter((item: any) => !seen.has(item.signature))
-  if (newItems.length) {
-    const first = newItems[0]
+async function openToastNotification(item: InboxNotification) {
+  if (!item.read_at) await api.patch(`/inbox/notifications/${item.id}/read`)
+  try {
+    await inboxTargetIsAvailable(item.action, item.target_id)
+  } catch (error: any) {
+    if (error?.response?.status === 404) {
+      ElMessage.info('该申请不存在或已无权查看，通知中心已刷新')
+      await refreshInbox(false)
+      return
+    }
+    throw error
+  }
+  await router.push(inboxLocation(item.action, item.target_id))
+  await refreshInbox(false)
+}
+
+async function announceNewNotifications(afterId: number) {
+  const result = await api.get('/inbox/notifications', {
+    params: { after_id: afterId, page_size: 100 },
+    silentError: true,
+  })
+  if (result.total === 1 && result.items[0]) {
+    const item = result.items[0] as InboxNotification
     ElNotification({
-      title: '新的商户入驻申请',
-      message: newItems.length === 1
-        ? `“${first.merchant_name}”已提交入驻资料，点击前往审核`
-        : `有 ${newItems.length} 份新的入驻申请，点击前往审核`,
-      type: 'warning',
+      title: item.title,
+      message: `${item.message}（点击查看）`,
+      type: 'success',
       duration: 10_000,
-      onClick: () => router.push('/merchants'),
+      onClick: () => void openToastNotification(item),
+    })
+  } else if (result.total > 1) {
+    ElNotification({
+      title: '收到新的业务通知',
+      message: `有 ${result.total} 条新通知，点击打开通知中心`,
+      type: 'success',
+      duration: 10_000,
+      onClick: () => { inboxVisible.value = true },
     })
   }
-  const signatures = Array.from(new Set([
-    ...current.map((item: any) => item.signature),
-    ...seen,
-  ])).slice(0, 100)
-  localStorage.setItem(onboardingSeenKey(), JSON.stringify(signatures))
-  if (previousCount !== result.pending_count || newItems.length) {
-    window.dispatchEvent(new CustomEvent('wst:onboarding-changed'))
+}
+
+async function refreshInbox(announce = true) {
+  try {
+    const result = await api.get('/inbox/summary', { silentError: true }) as InboxSummary
+    const previousLatest = latestNotificationId
+    inboxSummary.value = result
+    if (!inboxInitialized) {
+      inboxInitialized = true
+      latestNotificationId = result.latest_notification_id
+    } else if (result.latest_notification_id > previousLatest) {
+      latestNotificationId = result.latest_notification_id
+      if (announce) await announceNewNotifications(previousLatest)
+    }
+    updateDocumentTitle()
+  } catch {
+    // 后台轮询失败保持静默，下一轮或页面恢复可见时会重试。
   }
 }
 
-async function refreshSummaries() {
-  await Promise.allSettled([
-    loadApplicationSummary(),
-    loadOnboardingSummary(),
-  ])
+function requestInboxRefresh() {
+  void refreshInbox(false)
 }
 
-function requestOnboardingSummaryRefresh() {
-  void loadOnboardingSummary().catch(() => undefined)
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') void refreshInbox()
 }
 
 onMounted(async () => {
-  window.addEventListener('wst:onboarding-refresh', requestOnboardingSummaryRefresh)
+  window.addEventListener('wst:onboarding-refresh', requestInboxRefresh)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   if (isOperator.value) {
     const result = await api.get('/merchants', { params: { page_size: 100, status: 'enabled' } })
     merchants.value = result.items
     if (!session.selectedMerchantId && merchants.value[0]) session.selectedMerchantId = merchants.value[0].id
   }
-  await refreshSummaries()
-  summaryTimer = window.setInterval(refreshSummaries, 30_000)
+  await refreshInbox()
+  summaryTimer = window.setInterval(() => void refreshInbox(), 30_000)
 })
 onBeforeUnmount(() => {
   window.clearInterval(summaryTimer)
-  window.removeEventListener('wst:onboarding-refresh', requestOnboardingSummaryRefresh)
+  window.removeEventListener('wst:onboarding-refresh', requestInboxRefresh)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   document.title = baseDocumentTitle
 })
 
@@ -192,6 +213,10 @@ function userCommand(command: string) {
           >
             <el-option v-for="merchant in merchants" :key="merchant.id" :label="merchant.name" :value="merchant.id" />
           </el-select>
+          <button class="inbox-button" type="button" :aria-label="isOperator ? '打开通知与待办中心' : '打开通知中心'" @click="inboxVisible=true">
+            <el-icon><Bell /></el-icon>
+            <span v-if="inboxSummary.unread_count" class="inbox-count">{{ inboxSummary.unread_count > 99 ? '99+' : inboxSummary.unread_count }}</span>
+          </button>
           <el-dropdown trigger="click" @command="userCommand">
             <button class="user-menu">
               <span class="avatar">{{ session.user?.display_name.slice(0, 1) }}</span>
@@ -224,6 +249,7 @@ function userCommand(command: string) {
       </div>
       <p class="invitation-expiry">有效期至：{{ invitationExpiresAt ? new Date(invitationExpiresAt).toLocaleString('zh-CN', { hour12: false }) : '' }}</p>
     </el-dialog>
+    <InboxCenter v-model="inboxVisible" :summary="inboxSummary" :show-work-items="isOperator" @refresh="requestInboxRefresh" />
   </div>
 </template>
 
@@ -251,6 +277,7 @@ function userCommand(command: string) {
 .env { font-size: 10px; font-weight: 500; border: 1px solid #bcded9; background: #edf8f6; color: #16766e; padding: 3px 7px; border-radius: 5px; }
 .top-actions { display: flex; align-items: center; gap: 10px; }
 .merchant-switch { width: 210px; margin-right: 10px; }
+.inbox-button{position:relative;width:38px;height:38px;display:grid;place-items:center;border:0;border-radius:11px;background:#edf8f5;color:var(--brand);cursor:pointer}.inbox-button:hover{background:#dff1ed}.inbox-button>.el-icon{position:static;width:1em;height:1em;background:transparent;color:var(--brand);font-size:20px}.inbox-count{position:absolute;z-index:1;right:-5px;top:-5px;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;display:grid;place-items:center;border:2px solid #fff;border-radius:9px;background:#e77c45;color:#fff;font-size:8px;line-height:1;font-weight:700}
 .avatar { width: 36px; height: 36px; border-radius: 11px; background: #d8efe9; color: #0b766f; display: grid; place-items: center; font-weight: 700; }
 .user-menu{border:0;background:transparent;padding:0;display:flex;align-items:center;gap:10px;cursor:pointer;text-align:left;color:inherit}.user-copy { display: flex; flex-direction: column; min-width: 65px; }
 .user-copy strong { font-size: 13px; }
@@ -275,5 +302,6 @@ function userCommand(command: string) {
 @media (max-width: 420px) {
   .merchant-switch { width: 135px; }
   .top-actions { gap: 6px; }
+  .inbox-button{width:34px;height:34px}.inbox-button .el-icon{font-size:19px}
 }
 </style>
