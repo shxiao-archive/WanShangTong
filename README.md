@@ -11,6 +11,16 @@
 - 数据库：开发默认 SQLite，生产 MySQL 8.4
 - 部署：Docker Compose、Nginx、Let's Encrypt
 
+## 项目文档
+
+详细文档见 [docs 文档中心](./docs/README.md)：
+
+- [功能介绍](./docs/功能介绍.md)
+- [开发指南](./docs/开发指南.md)
+- [架构说明](./docs/架构说明.md)
+- [API 概览](./docs/API概览.md)
+- [部署指南](./docs/部署指南.md)
+
 ## 本地开发
 
 后端推荐 Python 3.12：
@@ -53,7 +63,10 @@ npm run build
 ```bash
 cp .env.example .env
 # 修改所有密码、JWT_SECRET、域名和 CORS_ORIGINS
-docker compose up -d --build
+docker compose build
+docker compose up -d db
+docker compose run --rm api alembic upgrade head
+docker compose up -d
 docker compose ps
 curl http://127.0.0.1:8080/api/v1/health
 ```
