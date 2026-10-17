@@ -1,4 +1,5 @@
 import hashlib
+import secrets
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -777,6 +778,7 @@ def test_operator_merchant_pages_are_read_only():
 
 
 def test_account_lock_after_five_failures():
+    registration_password = f"Lock1!{secrets.token_hex(8)}"
     with TestClient(app) as client:
         operator = operator_headers(client)
         users = client.get("/api/v1/users", headers=operator).json()["data"]
@@ -789,7 +791,7 @@ def test_account_lock_after_five_failures():
                 json={
                     "account_type": "merchant",
                     "username": "lock_test",
-                    "password": "Lock2026Pass",
+                    "password": registration_password,
                     "display_name": "锁定测试",
                     "merchant_name": merchant["name"],
                     "industry": merchant["industry"],
@@ -800,7 +802,7 @@ def test_account_lock_after_five_failures():
             )
             assert response.status_code == 201, response.text
             approve_registered_merchant(client, response.json()["data"], merchant)
-            correct_password = "Lock2026Pass"
+            correct_password = registration_password
         else:
             response = client.post(f"/api/v1/users/{account['id']}/reset-password", headers=operator)
             correct_password = response.json()["data"]["temporary_password"]

@@ -290,7 +290,7 @@ class MerchantOnboardingOut(MerchantOnboardingDraftIn):
     model_config = ConfigDict(from_attributes=True)
 
 
-class BusinessDataIn(BaseModel):
+class BusinessDataBase(BaseModel):
     business_date: date
     visitors: int = Field(ge=0)
     orders: int = Field(ge=0)
@@ -303,9 +303,7 @@ class BusinessDataIn(BaseModel):
     peak_hour: int = Field(default=12, ge=0, le=23)
 
     @model_validator(mode="after")
-    def valid_business_data(self):
-        if self.business_date > date.today():
-            raise ValueError("经营日期不能晚于今天")
+    def valid_order_sources(self):
         source_total = (
             self.dine_in_orders
             + self.delivery_orders
@@ -318,7 +316,15 @@ class BusinessDataIn(BaseModel):
         return self
 
 
-class BusinessDataOut(BusinessDataIn):
+class BusinessDataIn(BusinessDataBase):
+    @model_validator(mode="after")
+    def valid_business_date(self):
+        if self.business_date > date.today():
+            raise ValueError("经营日期不能晚于今天")
+        return self
+
+
+class BusinessDataOut(BusinessDataBase):
     id: int
     merchant_id: int
     updated_at: datetime
